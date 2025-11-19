@@ -1,0 +1,13 @@
+*.csv
+*.json
+*.txt
+*.log
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+/uploads
