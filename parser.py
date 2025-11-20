@@ -334,14 +334,18 @@ class ZzerParser:
                 'all_images': []
             }
     
-    async def download_image(self, session, image_url, product_id, image_index, is_main=False):
-        upload_dir = self.parsing_config['upload_dir']
+    async def download_image(self, session, image_url, product_id, image_index, is_main=False, base_dir=None):
+        # Если base_dir указан, используем его, иначе текущую папку
+        if base_dir:
+            upload_dir = Path(base_dir) / self.parsing_config['upload_dir']
+        else:
+            upload_dir = Path(self.parsing_config['upload_dir'])
         
         try:
-            # Создаем папку для товара: uploads/product_id/
+            # Создаем папку для товара: base_dir/uploads/product_id/
             safe_id = str(product_id).replace('/', '_').replace('\\', '_')
-            product_dir = os.path.join(upload_dir, safe_id)
-            Path(product_dir).mkdir(parents=True, exist_ok=True)
+            product_dir = upload_dir / safe_id
+            product_dir.mkdir(parents=True, exist_ok=True)
             
             # Расширение файла
             ext = os.path.splitext(image_url.split('?')[0])[1] or '.jpg'
@@ -354,16 +358,16 @@ class ZzerParser:
             else:
                 filename = f"{image_index}{ext}"
             
-            filepath = os.path.join(product_dir, filename)
+            filepath = product_dir / filename
             
-            if os.path.exists(filepath):
-                return filepath
+            if filepath.exists():
+                return str(filepath)
             
             async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
                     with open(filepath, 'wb') as f:
                         f.write(await response.read())
-                    return filepath
+                    return str(filepath)
             
             return None
             
@@ -372,6 +376,11 @@ class ZzerParser:
     
     async def parse_task(self, task):
         max_products = self.parsing_config['max_products']
+        
+        # Создаем папку для результатов с текущей датой
+        today = datetime.now().strftime('%Y-%m-%d')
+        results_dir = Path('products') / today
+        results_dir.mkdir(parents=True, exist_ok=True)
         
         async with async_playwright() as p:
             print("\n" + "="*60)
@@ -490,7 +499,7 @@ class ZzerParser:
                         for idx, img_data in enumerate(product.get('all_images', [])):
                             img_url = img_data['url']
                             is_main = img_data['is_main']
-                            tasks.append(self.download_image(session, img_url, product['id'], idx, is_main))
+                            tasks.append(self.download_image(session, img_url, product['id'], idx, is_main, base_dir=results_dir))
                         
                         results = await asyncio.gather(*tasks, return_exceptions=True)
                         downloaded = [r for r in results if r and not isinstance(r, Exception)]
@@ -509,6 +518,11 @@ class ZzerParser:
                 await browser.close()
     
     def save_results(self, products, task_name):
+        # Создаем структуру папок по дате
+        today = datetime.now().strftime('%Y-%m-%d')
+        results_dir = Path('products') / today
+        results_dir.mkdir(parents=True, exist_ok=True)
+        
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
         # Безопасное имя файла из названия задачи
@@ -516,13 +530,13 @@ class ZzerParser:
         safe_name = safe_name.replace(' ', '_').lower()
         
         # JSON
-        json_filename = f'products_{safe_name}_{timestamp}.json'
+        json_filename = results_dir / f'products_{safe_name}_{timestamp}.json'
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(products, f, ensure_ascii=False, indent=2)
         print(f"\n✓ JSON: {json_filename}")
         
         # CSV для 1С
-        csv_filename = f'products_1c_{safe_name}_{timestamp}.csv'
+        csv_filename = results_dir / f'products_1c_{safe_name}_{timestamp}.csv'
         with open(csv_filename, 'w', encoding='utf-8-sig', newline='') as csvfile:
             # Получаем все уникальные параметры из details
             all_detail_keys = set()
@@ -612,12 +626,15 @@ class ZzerParser:
         
         # Статистика
         total_images = sum(len(p.get('downloaded_images', [])) for p in products)
+        uploads_dir = results_dir / self.parsing_config['upload_dir']
         print(f"\n{'='*60}")
         print("📊 Итого:")
         print(f"   Товаров: {len(products)}")
         print(f"   Изображений: {total_images}")
-        print(f"   Папка: {self.parsing_config['upload_dir']}/")
-        print(f"   CSV для 1С: {csv_filename}")
+        print(f"   Папка результатов: {results_dir}/")
+        print(f"   JSON: {json_filename.name}")
+        print(f"   CSV: {csv_filename.name}")
+        print(f"   Изображения: {uploads_dir}/")
         print(f"{'='*60}")
         print("\n✅ Парсинг завершен!")
     
