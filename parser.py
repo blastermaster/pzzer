@@ -305,6 +305,8 @@ class ZzerParser:
                     combined_value = ' / '.join(values_list)
                     # Заменяем запятые на точки в десятичных дробях (22,5 -> 22.5)
                     combined_value = re.sub(r'(\d),(\d)', r'\1.\2', combined_value)
+                    # Заменяем остальные запятые на " - " (чтобы не ломать CSV)
+                    combined_value = combined_value.replace(',', ' -')
                     details[translated_name] = combined_value
             
             # Извлекаем изображения из detail.imageList
@@ -413,43 +415,72 @@ class ZzerParser:
                 except:
                     pass
                 
-                # API запрос
+                # API запросы с пагинацией
                 api_url = self.build_api_url(task['endpoint'])
-                payload = self.build_payload(task['payload'])
                 
                 print(f"\nAPI запрос: {api_url}")
                 
-                api_data = await page.evaluate(f"""
-                    async () => {{
-                        const response = await fetch('{api_url}', {{
-                            method: 'POST',
-                            headers: {{
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json'
-                            }},
-                            body: JSON.stringify({json.dumps(payload)})
-                        }});
-                        
-                        if (response.ok) {{
-                            return await response.json();
+                # Собираем товары со всех страниц
+                all_products = []
+                current_page = 1
+                page_size = task['payload'].get('size', 20) or task['payload'].get('pageSize', 20)
+                
+                while len(all_products) < max_products:
+                    # Обновляем номер страницы в payload
+                    payload = self.build_payload(task['payload'])
+                    payload['page'] = current_page
+                    if 'size' in payload:
+                        payload['size'] = page_size
+                    elif 'pageSize' in payload:
+                        payload['pageSize'] = page_size
+                    
+                    print(f"  Страница {current_page}...", end=' ')
+                    
+                    api_data = await page.evaluate(f"""
+                        async () => {{
+                            const response = await fetch('{api_url}', {{
+                                method: 'POST',
+                                headers: {{
+                                    'Content-Type': 'application/json',
+                                    'Accept': 'application/json'
+                                }},
+                                body: JSON.stringify({json.dumps(payload)})
+                            }});
+                            
+                            if (response.ok) {{
+                                return await response.json();
+                            }}
+                            return null;
                         }}
-                        return null;
-                    }}
-                """)
+                    """)
+                    
+                    if not api_data or not api_data.get('data'):
+                        print("⚠️ Ошибка API")
+                        break
+                    
+                    products_list = api_data.get('data', {}).get('list', [])
+                    if not products_list:
+                        print("конец списка")
+                        break
+                    
+                    print(f"✓ {len(products_list)} товаров")
+                    all_products.extend(products_list)
+                    
+                    # Если получили меньше чем page_size, значит это последняя страница
+                    if len(products_list) < page_size:
+                        break
+                    
+                    current_page += 1
+                    await asyncio.sleep(0.5)  # Задержка между запросами страниц
                 
-                if not api_data or not api_data.get('data'):
-                    print("⚠️ Ошибка API")
+                if not all_products:
+                    print("⚠️ Не удалось получить товары")
                     return []
                 
-                products_list = api_data.get('data', {}).get('list', [])
-                if not products_list:
-                    print("⚠️ Пустой список товаров")
-                    return []
-                
-                print(f"✓ Получено товаров: {len(products_list)}")
+                print(f"\n✓ Всего получено товаров: {len(all_products)}")
                 
                 # Ограничиваем количество
-                products_to_process = products_list[:max_products]
+                products_to_process = all_products[:max_products]
                 
                 print(f"\n{'='*60}")
                 print(f"Обработка {len(products_to_process)} товаров...")
