@@ -4,13 +4,11 @@
 import asyncio
 import json
 import os
-import csv
 import time
 import re
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright
-import aiohttp
 import argparse
 from deep_translator import GoogleTranslator
 
@@ -104,6 +102,31 @@ class ZzerParser:
             print(f"      Ошибка перевода: {e}")
             return text
     
+    def translate_product_name(self, name):
+        """Перевод названия товара с сохранением латинских названий серий"""
+        if not name or not isinstance(name, str):
+            return name
+        
+        # Извлекаем латинские буквы, цифры и пробелы в начале строки (название серии)
+        # Например: "Trendy CC", "Classic Flap", "Boy", "255"
+        match = re.match(r'^([A-Za-z0-9\s]+)', name)
+        
+        if match:
+            # Есть латинская часть в начале
+            latin_part = match.group(1).strip()
+            chinese_part = name[len(match.group(1)):].strip()
+            
+            if chinese_part:
+                # Переводим только китайскую часть
+                translated_chinese = self.translate_chinese_to_russian(chinese_part)
+                return f"{latin_part} {translated_chinese}"
+            else:
+                # Только латинская часть
+                return latin_part
+        else:
+            # Нет латинской части, переводим всё
+            return self.translate_chinese_to_russian(name)
+    
     def extract_product_data(self, raw_item):
         """Извлечение данных из товара"""
         # Проверяем, есть ли вложенный объект product
@@ -122,40 +145,29 @@ class ZzerParser:
         # Описание
         description = product.get('description') or product.get('desc') or product.get('degreeName', '')
         
-        # Текущая цена со скидкой (уже в юанях)
-        price_raw = (product.get('price') or product.get('salePrice') or 
-                     product.get('currentPrice') or product.get('showPrice', 0))
-        
+        # Оригинальная цена без скидки (основная цена)
+        price_raw = product.get('originalPrice', 0)
         if price_raw and isinstance(price_raw, (int, float)):
             price_cny = float(price_raw)
             price = str(price_cny)
             # Конвертация в рубли: юань * 12 * 1.35
             price_rub = price_cny * 12 * 1.35
         else:
-            price = str(price_raw) if price_raw else ''
+            price = ''
             price_rub = 0
         
-        # Оригинальная цена без скидки
-        original_price_raw = product.get('originalPrice', 0)
-        if original_price_raw and isinstance(original_price_raw, (int, float)):
-            original_price_cny = float(original_price_raw)
-            original_price = str(original_price_cny)
-            # В рублях
-            original_price_rub = original_price_cny * 12 * 1.35
-        else:
-            original_price = ''
-            original_price_rub = 0
+        # Цена со скидкой (если есть)
+        price_discount_raw = (product.get('price') or product.get('salePrice') or 
+                              product.get('currentPrice') or product.get('showPrice', 0))
         
-        # Рыночная цена (для справки)
-        market_price_raw = product.get('marketPrice', 0)
-        if market_price_raw and isinstance(market_price_raw, (int, float)):
-            market_price = str(float(market_price_raw))
+        if price_discount_raw and isinstance(price_discount_raw, (int, float)):
+            price_discount_cny = float(price_discount_raw)
+            price_discount = str(price_discount_cny)
+            # Конвертация в рубли: юань * 12 * 1.35
+            price_rub_discount = price_discount_cny * 12 * 1.35
         else:
-            market_price = ''
-        
-        # Изображения
-        images = []
-        main_image = None
+            price_discount = ''
+            price_rub_discount = 0
         
         # Основное изображение (главное)
         main_img = product.get('ico') or product.get('image') or product.get('mainImage') or product.get('img')
@@ -163,46 +175,36 @@ class ZzerParser:
             if not main_img.startswith('http'):
                 main_img = f"{self.api_config['image_cdn']}/{main_img}"
             main_image = main_img
-            images.append({'url': main_img, 'is_main': True})
-        
-        # Галерея
-        gallery = (product.get('images') or product.get('imageList') or 
-                   product.get('gallery') or [])
-        
-        if isinstance(gallery, list):
-            for img in gallery:
-                if isinstance(img, str):
-                    if not img.startswith('http'):
-                        img = f"{self.api_config['image_cdn']}/{img}"
-                    # Проверяем, не главное ли это изображение
-                    is_main = (img == main_image)
-                    if not is_main:  # Не дублируем главное
-                        images.append({'url': img, 'is_main': False})
+        else:
+            main_image = None
         
         # Дополнительная информация
         brand = product.get('brand') or product.get('brandName', '')
         size = product.get('sizeName', '')
-        condition = product.get('degreeName', '')
+        condition_raw = product.get('degreeName', '')
+        # Извлекаем только цифры из condition (например, "9.5新" -> "9.5")
+        condition = re.sub(r'[^\d.]', '', condition_raw) if condition_raw else ''
         sku = product.get('sku', '')
+        
+        # Переводим название на русский (с сохранением латинских названий серий)
+        name_ru = self.translate_product_name(name) if name else ''
         
         return {
             'id': product_id,
             'sku': sku,
             'name': name,
-            'description': f"{condition}. Size: {size}" if size else condition,
+            'name_ru': name_ru,
+            'description': f"{condition_raw}. Size: {size}" if size else condition_raw,
             'price': price,
             'price_rub': f"{price_rub:.2f}",
-            'original_price': original_price,
-            'original_price_rub': f"{original_price_rub:.2f}",
-            'market_price': market_price,
+            'price_discount': price_discount,
+            'price_rub_discount': f"{price_rub_discount:.2f}",
             'currency': 'CNY',
             'brand': brand,
             'size': size,
             'condition': condition,
-            'images': images,
             'main_image': main_image,
-            'details': {},  # Заполнится при парсинге карточки
-            'raw_data': raw_item
+            'details': {}  # Заполнится при парсинге карточки
         }
     
     async def get_product_details(self, page, product_id):
@@ -309,6 +311,21 @@ class ZzerParser:
                     combined_value = combined_value.replace(',', ' -')
                     details[translated_name] = combined_value
             
+            # Постобработка деталей
+            # 1. Извлекаем год из серийного номера
+            if 'Серийный номер' in details:
+                serial = details['Серийный номер']
+                # Ищем разделитель ｜ и год после него
+                if '｜' in serial:
+                    parts = serial.split('｜')
+                    if len(parts) == 2:
+                        details['Серийный номер'] = parts[0].strip()
+                        details['Год'] = parts[1].strip()
+            
+            # 2. Заменяем "g" на "г" в весе
+            if 'Вес' in details:
+                details['Вес'] = details['Вес'].replace('g', 'г').replace('G', 'г')
+            
             # Извлекаем изображения из detail.imageList
             all_images = []
             
@@ -336,53 +353,8 @@ class ZzerParser:
                 'all_images': []
             }
     
-    async def download_image(self, session, image_url, product_id, image_index, is_main=False, base_dir=None):
-        # Если base_dir указан, используем его, иначе текущую папку
-        if base_dir:
-            upload_dir = Path(base_dir) / self.parsing_config['upload_dir']
-        else:
-            upload_dir = Path(self.parsing_config['upload_dir'])
-        
-        try:
-            # Создаем папку для товара: base_dir/uploads/product_id/
-            safe_id = str(product_id).replace('/', '_').replace('\\', '_')
-            product_dir = upload_dir / safe_id
-            product_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Расширение файла
-            ext = os.path.splitext(image_url.split('?')[0])[1] or '.jpg'
-            if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                ext = '.jpg'
-            
-            # Формируем имя файла
-            if is_main:
-                filename = f"main{ext}"
-            else:
-                filename = f"{image_index}{ext}"
-            
-            filepath = product_dir / filename
-            
-            if filepath.exists():
-                return str(filepath)
-            
-            async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                if response.status == 200:
-                    with open(filepath, 'wb') as f:
-                        f.write(await response.read())
-                    return str(filepath)
-            
-            return None
-            
-        except Exception as e:
-            return None
-    
     async def parse_task(self, task):
         max_products = self.parsing_config['max_products']
-        
-        # Создаем папку для результатов с текущей датой
-        today = datetime.now().strftime('%Y-%m-%d')
-        results_dir = Path('products') / today
-        results_dir.mkdir(parents=True, exist_ok=True)
         
         async with async_playwright() as p:
             print("\n" + "="*60)
@@ -504,39 +476,17 @@ class ZzerParser:
                     
                     # Добавляем главное
                     if main_img:
-                        all_images.append({'url': main_img, 'is_main': True})
+                        all_images.append(main_img)
                     
                     # Добавляем остальные из карточки
                     for img_url in details_data['all_images']:
                         if img_url != main_img:  # Не дублируем главное
-                            all_images.append({'url': img_url, 'is_main': False})
+                            all_images.append(img_url)
                     
                     product['all_images'] = all_images
                     processed_products.append(product)
                     
                     await asyncio.sleep(0.5)  # Задержка между товарами
-                
-                # Скачивание изображений
-                print(f"\n{'='*60}")
-                print("Скачивание изображений...")
-                print(f"{'='*60}\n")
-                
-                async with aiohttp.ClientSession() as session:
-                    for product in processed_products:
-                        print(f"\nТовар: {product['name'][:40]}")
-                        downloaded = []
-                        
-                        tasks = []
-                        for idx, img_data in enumerate(product.get('all_images', [])):
-                            img_url = img_data['url']
-                            is_main = img_data['is_main']
-                            tasks.append(self.download_image(session, img_url, product['id'], idx, is_main, base_dir=results_dir))
-                        
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
-                        downloaded = [r for r in results if r and not isinstance(r, Exception)]
-                        
-                        product['downloaded_images'] = downloaded
-                        print(f"  ✓ Скачано: {len(downloaded)} изображений")
                 
                 return processed_products
                 
@@ -548,124 +498,27 @@ class ZzerParser:
             finally:
                 await browser.close()
     
-    def save_results(self, products, task_name):
-        # Создаем структуру папок по дате
-        today = datetime.now().strftime('%Y-%m-%d')
-        results_dir = Path('products') / today
+    def save_results(self, products, task):
+        # Создаем папку products
+        results_dir = Path('products')
         results_dir.mkdir(parents=True, exist_ok=True)
         
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
-        # Безопасное имя файла из названия задачи
-        safe_name = "".join(c for c in task_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        safe_name = safe_name.replace(' ', '_').lower()
+        # Получаем brandId из payload задачи
+        brand_id = task.get('payload', {}).get('brandId', 'unknown')
         
         # JSON
-        json_filename = results_dir / f'products_{safe_name}_{timestamp}.json'
+        json_filename = results_dir / f'brand_{brand_id}.json'
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(products, f, ensure_ascii=False, indent=2)
         print(f"\n✓ JSON: {json_filename}")
         
-        # CSV для 1С
-        csv_filename = results_dir / f'products_1c_{safe_name}_{timestamp}.csv'
-        with open(csv_filename, 'w', encoding='utf-8-sig', newline='') as csvfile:
-            # Получаем все уникальные параметры из details
-            all_detail_keys = set()
-            for product in products:
-                all_detail_keys.update(product.get('details', {}).keys())
-            
-            # Базовые поля
-            fieldnames = [
-                'Код', 
-                'Артикул', 
-                'Наименование', 
-                'Цена_CNY', 
-                'Цена_RUB', 
-                'ЦенаБезСкидки_CNY',
-                'ЦенаБезСкидки_RUB',
-                'ЦенаРыночная_CNY', 
-                'Валюта', 
-                'Бренд', 
-                'Состояние'
-            ]
-            
-            # Фиксированный порядок для часто встречающихся параметров
-            preferred_order = [
-                'Серия',
-                'Серийный номер', 
-                'Материал',
-                'Вес',
-                'Размеры',
-                'Комплект'
-            ]
-            
-            # Добавляем поля деталей в правильном порядке
-            detail_keys_sorted = []
-            
-            # Сначала добавляем в предпочтительном порядке
-            for key in preferred_order:
-                if key in all_detail_keys:
-                    detail_keys_sorted.append(key)
-            
-            # Потом добавляем остальные (в алфавитном порядке)
-            remaining_keys = sorted(all_detail_keys - set(preferred_order))
-            detail_keys_sorted.extend(remaining_keys)
-            
-            fieldnames.extend(detail_keys_sorted)
-            
-            # Добавляем поля для картинок (в конце!)
-            for i in range(1, 11):
-                fieldnames.append(f'Картинка{i}')
-            
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=';', 
-                                   quoting=csv.QUOTE_MINIMAL, quotechar='"')
-            writer.writeheader()
-            
-            for product in products:
-                images = product.get('downloaded_images', [])
-                image_dict = {f'Картинка{i+1}': images[i] if i < len(images) else '' for i in range(10)}
-                
-                # Формируем строку с деталями
-                details_dict = {}
-                for key in detail_keys_sorted:
-                    details_dict[key] = product.get('details', {}).get(key, '')
-                
-                # Формируем строку для записи
-                row_data = {
-                    'Код': product['id'],
-                    'Артикул': product.get('sku', ''),
-                    'Наименование': product['name'],
-                    'Цена_CNY': product['price'],
-                    'Цена_RUB': product.get('price_rub', ''),
-                    'ЦенаБезСкидки_CNY': product.get('original_price', ''),
-                    'ЦенаБезСкидки_RUB': product.get('original_price_rub', ''),
-                    'ЦенаРыночная_CNY': product.get('market_price', ''),
-                    'Валюта': product['currency'],
-                    'Бренд': product.get('brand', ''),
-                    'Состояние': product.get('condition', '')
-                }
-                
-                # Добавляем детали
-                row_data.update(details_dict)
-                
-                # Добавляем картинки
-                row_data.update(image_dict)
-                
-                writer.writerow(row_data)
-        
-        print(f"✓ CSV для 1С: {csv_filename}")
-        
         # Статистика
-        total_images = sum(len(p.get('downloaded_images', [])) for p in products)
-        uploads_dir = results_dir / self.parsing_config['upload_dir']
+        total_images = sum(len(p.get('all_images', [])) for p in products)
         print(f"\n{'='*60}")
         print("📊 Итого:")
         print(f"   Товаров: {len(products)}")
-        print(f"   Изображений: {total_images}")
-        print(f"   Папка результатов: {results_dir}/")
-        print(f"   JSON: {json_filename.name}")
-        print(f"   CSV: {csv_filename.name}")
-        print(f"   Изображения: {uploads_dir}/")
+        print(f"   Изображений (ссылок): {total_images}")
+        print(f"   Файл: {json_filename}")
         print(f"{'='*60}")
         print("\n✅ Парсинг завершен!")
     
@@ -696,7 +549,7 @@ class ZzerParser:
             products = await self.parse_task(task)
             
             if products:
-                self.save_results(products, task['name'])
+                self.save_results(products, task)
 
 
 async def main():
