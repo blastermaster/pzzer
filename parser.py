@@ -353,6 +353,40 @@ class ZzerParser:
                 'all_images': []
             }
     
+    async def process_single_product(self, page, raw_product, idx):
+        """Обработка одного товара (для параллельного выполнения)"""
+        try:
+            product = self.extract_product_data(raw_product)
+            print(f"{idx}. {product['name'][:50]} - ¥{product['price']} (₽{product['price_rub']})")
+            
+            # Получаем детали из карточки товара
+            details_data = await self.get_product_details(page, product['id'])
+            
+            # Обновляем продукт
+            product['details'] = details_data['details']
+            
+            # Объединяем изображения: главное + из карточки
+            main_img = product['main_image']
+            all_images = []
+            
+            # Добавляем главное
+            if main_img:
+                all_images.append(main_img)
+            
+            # Добавляем остальные из карточки
+            for img_url in details_data['all_images']:
+                if img_url != main_img:  # Не дублируем главное
+                    all_images.append(img_url)
+            
+            product['all_images'] = all_images
+            
+            await asyncio.sleep(0.3)  # Небольшая задержка
+            return product
+            
+        except Exception as e:
+            print(f"  ✗ Ошибка обработки товара #{idx}: {e}")
+            return None
+    
     async def parse_task(self, task):
         max_products = self.parsing_config['max_products']
         
@@ -453,40 +487,68 @@ class ZzerParser:
                 
                 # Ограничиваем количество
                 products_to_process = all_products[:max_products]
+                total_count = len(products_to_process)
+                
+                # Размер батча
+                batch_size = self.parsing_config.get('batch_size', 50)
+                
+                # Проверяем, есть ли уже сохраненные результаты
+                results_dir = Path('products')
+                brand_id = task.get('payload', {}).get('brandId', 'unknown')
+                json_filename = results_dir / f'brand_{brand_id}.json'
+                
+                processed_products = []
+                start_idx = 0
+                
+                if json_filename.exists():
+                    try:
+                        with open(json_filename, 'r', encoding='utf-8') as f:
+                            processed_products = json.load(f)
+                        start_idx = len(processed_products)
+                        print(f"\n✓ Найдено {start_idx} обработанных товаров, продолжаем с позиции {start_idx + 1}")
+                    except:
+                        processed_products = []
+                        start_idx = 0
+                
+                # Параллельность
+                concurrent_workers = self.parsing_config.get('concurrent_workers', 5)
                 
                 print(f"\n{'='*60}")
-                print(f"Обработка {len(products_to_process)} товаров...")
+                print(f"Обработка {total_count} товаров (батчами по {batch_size})")
+                print(f"Параллельность: {concurrent_workers} товаров одновременно")
+                print(f"Прогресс: {start_idx}/{total_count}")
                 print(f"{'='*60}\n")
                 
-                # Обрабатываем каждый товар
-                processed_products = []
-                for idx, raw_product in enumerate(products_to_process, 1):
-                    product = self.extract_product_data(raw_product)
-                    print(f"{idx}. {product['name'][:50]} - ¥{product['price']} (₽{product['price_rub']})")
+                # Обрабатываем товары батчами
+                for batch_start in range(start_idx, total_count, batch_size):
+                    batch_end = min(batch_start + batch_size, total_count)
+                    batch_products = products_to_process[batch_start:batch_end]
                     
-                    # Получаем детали из карточки товара
-                    details_data = await self.get_product_details(page, product['id'])
+                    print(f"\n{'─'*60}")
+                    print(f"📦 Батч {batch_start // batch_size + 1}: товары {batch_start + 1}-{batch_end} из {total_count}")
+                    print(f"{'─'*60}\n")
                     
-                    # Обновляем продукт
-                    product['details'] = details_data['details']
+                    # Обрабатываем товары параллельно группами по concurrent_workers
+                    for chunk_start in range(0, len(batch_products), concurrent_workers):
+                        chunk_end = min(chunk_start + concurrent_workers, len(batch_products))
+                        chunk = batch_products[chunk_start:chunk_end]
+                        
+                        # Создаем задачи для параллельной обработки
+                        tasks = []
+                        for i, raw_product in enumerate(chunk):
+                            idx = batch_start + chunk_start + i + 1
+                            tasks.append(self.process_single_product(page, raw_product, idx))
+                        
+                        # Запускаем параллельно
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        
+                        # Собираем результаты
+                        for result in results:
+                            if result and not isinstance(result, Exception):
+                                processed_products.append(result)
                     
-                    # Объединяем изображения: главное + из карточки
-                    main_img = product['main_image']
-                    all_images = []
-                    
-                    # Добавляем главное
-                    if main_img:
-                        all_images.append(main_img)
-                    
-                    # Добавляем остальные из карточки
-                    for img_url in details_data['all_images']:
-                        if img_url != main_img:  # Не дублируем главное
-                            all_images.append(img_url)
-                    
-                    product['all_images'] = all_images
-                    processed_products.append(product)
-                    
-                    await asyncio.sleep(0.5)  # Задержка между товарами
+                    # Промежуточное сохранение после каждого батча
+                    self.save_batch(processed_products, task, batch_end, total_count)
                 
                 return processed_products
                 
@@ -497,6 +559,20 @@ class ZzerParser:
                 return []
             finally:
                 await browser.close()
+    
+    def save_batch(self, products, task, current, total):
+        """Промежуточное сохранение батча"""
+        results_dir = Path('products')
+        results_dir.mkdir(parents=True, exist_ok=True)
+        
+        brand_id = task.get('payload', {}).get('brandId', 'unknown')
+        json_filename = results_dir / f'brand_{brand_id}.json'
+        
+        with open(json_filename, 'w', encoding='utf-8') as f:
+            json.dump(products, f, ensure_ascii=False, indent=2)
+        
+        total_images = sum(len(p.get('all_images', [])) for p in products)
+        print(f"\n  ✓ Сохранено: {len(products)}/{total} товаров ({total_images} изображений)")
     
     def save_results(self, products, task):
         # Создаем папку products
