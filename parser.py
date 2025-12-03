@@ -192,27 +192,33 @@ class ZzerParser:
         return {
             'id': product_id,
             'sku': sku,
+            'article': '',  # Заполнится при парсинге карточки
             'name': name,
             'name_ru': name_ru,
             'description': f"{condition_raw}. Size: {size}" if size else condition_raw,
             'price': price,
-            'price_rub': f"{price_rub:.2f}",
+            'price_rub': f"{price_rub:.2f}" if price_rub else '',
             'price_discount': price_discount,
-            'price_rub_discount': f"{price_rub_discount:.2f}",
+            'price_rub_discount': f"{price_rub_discount:.2f}" if price_rub_discount else '',
             'currency': 'CNY',
             'brand': brand,
             'size': size,
             'condition': condition,
-            'main_image': main_image,
+            'main_image': main_image if main_image else '',
+            'city': '',  # Заполнится при парсинге карточки
+            'all_images': [],  # Заполнится при парсинге карточки
             'details': {}  # Заполнится при парсинге карточки
         }
     
     async def get_product_details(self, page, product_id):
         """Получение детальной информации из карточки товара через API"""
+        city_code = ''
+        article = ''
+        
         try:
-            print(f"    API детали товара...")
+            print(f"    Детали товара...")
             
-            # Формируем параметры для API запроса детали
+            # Формируем параметры для API запроса
             detail_params = {
                 'deviceId': self.device_config['deviceId'],
                 'fmt': self.device_config['fmt'],
@@ -225,10 +231,9 @@ class ZzerParser:
                 'plat': str(self.device_config['plat']),
                 'ts': str(int(time.time())),
                 'version': self.device_config['version'],
-                'sn': ''  # Подпись (пока пустая)
+                'sn': ''
             }
             
-            # Формируем URL с параметрами
             api_url = f"{self.api_config['base_url']}/product/api/v1/product/detail"
             
             # Выполняем API запрос через JavaScript в браузере
@@ -254,7 +259,9 @@ class ZzerParser:
                 print(f"    ✗ Нет данных от API")
                 return {
                     'details': {},
-                    'all_images': []
+                    'all_images': [],
+                    'city': '',
+                    'article': ''
                 }
             
             # Проверяем код успеха (для detail API код = 100000)
@@ -263,7 +270,9 @@ class ZzerParser:
                 print(f"    ✗ Ошибка API: код={code}, msg={api_data.get('msg', 'Unknown')}")
                 return {
                     'details': {},
-                    'all_images': []
+                    'all_images': [],
+                    'city': '',
+                    'article': ''
                 }
             
             # Извлекаем данные из ответа API
@@ -271,6 +280,15 @@ class ZzerParser:
             detail = product_data.get('detail', {})
             product_attr = product_data.get('productAttr', {})
             product_attr_v2 = product_data.get('productAttrV2', {})
+            
+            # Извлекаем город из storeTextEn (например, "Shanghai ZZER Blackstone | HS3-2")
+            store_text_en = detail.get('storeTextEn', '')
+            if store_text_en:
+                first_word = store_text_en.split()[0] if store_text_en.split() else ''
+                if first_word and len(first_word) >= 3:
+                    city_code = first_word[:3].upper()
+                    article = f"{product_id}{city_code}"
+                    print(f"      ℹ️ Город: {store_text_en} → {city_code}")
             
             
             # Извлекаем параметры из productAttr
@@ -341,7 +359,9 @@ class ZzerParser:
             
             return {
                 'details': details,
-                'all_images': all_images
+                'all_images': all_images,
+                'city': city_code,
+                'article': article
             }
             
         except Exception as e:
@@ -350,7 +370,9 @@ class ZzerParser:
             traceback.print_exc()
             return {
                 'details': {},
-                'all_images': []
+                'all_images': [],
+                'city': '',
+                'article': ''
             }
     
     async def process_single_product(self, page, raw_product, idx):
@@ -363,7 +385,9 @@ class ZzerParser:
             details_data = await self.get_product_details(page, product['id'])
             
             # Обновляем продукт
-            product['details'] = details_data['details']
+            product['details'] = details_data.get('details', {})
+            product['city'] = details_data.get('city', '')
+            product['article'] = details_data.get('article', '')
             
             # Объединяем изображения: главное + из карточки
             main_img = product['main_image']
@@ -374,7 +398,7 @@ class ZzerParser:
                 all_images.append(main_img)
             
             # Добавляем остальные из карточки
-            for img_url in details_data['all_images']:
+            for img_url in details_data.get('all_images', []):
                 if img_url != main_img:  # Не дублируем главное
                     all_images.append(img_url)
             
@@ -510,12 +534,8 @@ class ZzerParser:
                         processed_products = []
                         start_idx = 0
                 
-                # Параллельность
-                concurrent_workers = self.parsing_config.get('concurrent_workers', 5)
-                
                 print(f"\n{'='*60}")
                 print(f"Обработка {total_count} товаров (батчами по {batch_size})")
-                print(f"Параллельность: {concurrent_workers} товаров одновременно")
                 print(f"Прогресс: {start_idx}/{total_count}")
                 print(f"{'='*60}\n")
                 
@@ -528,24 +548,13 @@ class ZzerParser:
                     print(f"📦 Батч {batch_start // batch_size + 1}: товары {batch_start + 1}-{batch_end} из {total_count}")
                     print(f"{'─'*60}\n")
                     
-                    # Обрабатываем товары параллельно группами по concurrent_workers
-                    for chunk_start in range(0, len(batch_products), concurrent_workers):
-                        chunk_end = min(chunk_start + concurrent_workers, len(batch_products))
-                        chunk = batch_products[chunk_start:chunk_end]
+                    # Обрабатываем товары последовательно (из-за page.goto в каждом товаре)
+                    for i, raw_product in enumerate(batch_products):
+                        idx = batch_start + i + 1
+                        result = await self.process_single_product(page, raw_product, idx)
                         
-                        # Создаем задачи для параллельной обработки
-                        tasks = []
-                        for i, raw_product in enumerate(chunk):
-                            idx = batch_start + chunk_start + i + 1
-                            tasks.append(self.process_single_product(page, raw_product, idx))
-                        
-                        # Запускаем параллельно
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
-                        
-                        # Собираем результаты
-                        for result in results:
-                            if result and not isinstance(result, Exception):
-                                processed_products.append(result)
+                        if result and not isinstance(result, Exception):
+                            processed_products.append(result)
                     
                     # Промежуточное сохранение после каждого батча
                     self.save_batch(processed_products, task, batch_end, total_count)
