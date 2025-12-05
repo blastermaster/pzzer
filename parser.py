@@ -210,10 +210,10 @@ class ZzerParser:
             'details': {}  # Заполнится при парсинге карточки
         }
     
-    async def get_product_details(self, page, product_id):
+    async def get_product_details(self, page, product_id, sku):
         """Получение детальной информации из карточки товара через API"""
         city_code = ''
-        article = ''
+        article = sku  # По умолчанию article = sku
         
         try:
             print(f"    Детали товара...")
@@ -261,7 +261,7 @@ class ZzerParser:
                     'details': {},
                     'all_images': [],
                     'city': '',
-                    'article': ''
+                    'article': article  # Возвращаем sku
                 }
             
             # Проверяем код успеха (для detail API код = 100000)
@@ -272,7 +272,7 @@ class ZzerParser:
                     'details': {},
                     'all_images': [],
                     'city': '',
-                    'article': ''
+                    'article': article  # Возвращаем sku
                 }
             
             # Извлекаем данные из ответа API
@@ -287,7 +287,7 @@ class ZzerParser:
                 first_word = store_text_en.split()[0] if store_text_en.split() else ''
                 if first_word and len(first_word) >= 3:
                     city_code = first_word[:3].upper()
-                    article = f"{product_id}{city_code}"
+                    article = f"{sku}{city_code}"  # sku + city_code
                     print(f"      ℹ️ Город: {store_text_en} → {city_code}")
             
             
@@ -372,7 +372,7 @@ class ZzerParser:
                 'details': {},
                 'all_images': [],
                 'city': '',
-                'article': ''
+                'article': sku  # Возвращаем sku даже при ошибке
             }
     
     async def process_single_product(self, page, raw_product, idx):
@@ -382,7 +382,7 @@ class ZzerParser:
             print(f"{idx}. {product['name'][:50]} - ¥{product['price']} (₽{product['price_rub']})")
             
             # Получаем детали из карточки товара
-            details_data = await self.get_product_details(page, product['id'])
+            details_data = await self.get_product_details(page, product['id'], product['sku'])
             
             # Обновляем продукт
             product['details'] = details_data.get('details', {})
