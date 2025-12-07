@@ -387,7 +387,8 @@ class ZzerParser:
             # Обновляем продукт
             product['details'] = details_data.get('details', {})
             product['city'] = details_data.get('city', '')
-            product['article'] = details_data.get('article', '')
+            # article всегда должен быть: sku или sku + city
+            product['article'] = details_data.get('article', product['sku'])
             
             # Объединяем изображения: главное + из карточки
             main_img = product['main_image']
@@ -516,20 +517,26 @@ class ZzerParser:
                 # Размер батча
                 batch_size = self.parsing_config.get('batch_size', 50)
                 
-                # Проверяем, есть ли уже сохраненные результаты
+                # Проверяем, есть ли незавершенная работа (временный файл)
                 results_dir = Path('products')
                 brand_id = task.get('payload', {}).get('brandId', 'unknown')
-                json_filename = results_dir / f'brand_{brand_id}.json'
+                json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
                 
                 processed_products = []
                 start_idx = 0
                 
-                if json_filename.exists():
+                # Проверяем временный файл для resume (но не основной, чтобы можно было перепарсить)
+                if json_filename_temp.exists():
                     try:
-                        with open(json_filename, 'r', encoding='utf-8') as f:
-                            processed_products = json.load(f)
+                        with open(json_filename_temp, 'r', encoding='utf-8') as f:
+                            temp_data = json.load(f)
+                            # Поддерживаем как старый формат (массив), так и новый (объект с products)
+                            if isinstance(temp_data, dict) and 'products' in temp_data:
+                                processed_products = temp_data['products']
+                            else:
+                                processed_products = temp_data
                         start_idx = len(processed_products)
-                        print(f"\n✓ Найдено {start_idx} обработанных товаров, продолжаем с позиции {start_idx + 1}")
+                        print(f"\n✓ Найдено {start_idx} обработанных товаров во временном файле, продолжаем с позиции {start_idx + 1}")
                     except:
                         processed_products = []
                         start_idx = 0
@@ -570,15 +577,21 @@ class ZzerParser:
                 await browser.close()
     
     def save_batch(self, products, task, current, total):
-        """Промежуточное сохранение батча"""
+        """Промежуточное сохранение батча во временный файл"""
         results_dir = Path('products')
         results_dir.mkdir(parents=True, exist_ok=True)
         
         brand_id = task.get('payload', {}).get('brandId', 'unknown')
-        json_filename = results_dir / f'brand_{brand_id}.json'
+        json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
         
-        with open(json_filename, 'w', encoding='utf-8') as f:
-            json.dump(products, f, ensure_ascii=False, indent=2)
+        # Сохраняем с новой структурой
+        data = {
+            'updated_at': datetime.now().isoformat(),
+            'products': products
+        }
+        
+        with open(json_filename_temp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
         
         total_images = sum(len(p.get('all_images', [])) for p in products)
         print(f"\n  ✓ Сохранено: {len(products)}/{total} товаров ({total_images} изображений)")
@@ -591,10 +604,23 @@ class ZzerParser:
         # Получаем brandId из payload задачи
         brand_id = task.get('payload', {}).get('brandId', 'unknown')
         
-        # JSON
+        # Сохраняем во временный файл с новой структурой
+        json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
+        data = {
+            'updated_at': datetime.now().isoformat(),
+            'products': products
+        }
+        with open(json_filename_temp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        # Финальный файл
         json_filename = results_dir / f'brand_{brand_id}.json'
-        with open(json_filename, 'w', encoding='utf-8') as f:
-            json.dump(products, f, ensure_ascii=False, indent=2)
+        
+        # Переименовываем _temp в обычный файл (с заменой если существует)
+        if json_filename.exists():
+            json_filename.unlink()  # Удаляем старый файл
+        json_filename_temp.rename(json_filename)
+        
         print(f"\n✓ JSON: {json_filename}")
         
         # Статистика
@@ -603,6 +629,7 @@ class ZzerParser:
         print("📊 Итого:")
         print(f"   Товаров: {len(products)}")
         print(f"   Изображений (ссылок): {total_images}")
+        print(f"   Обновлено: {data['updated_at']}")
         print(f"   Файл: {json_filename}")
         print(f"{'='*60}")
         print("\n✅ Парсинг завершен!")
