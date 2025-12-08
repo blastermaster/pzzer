@@ -6,6 +6,7 @@ import json
 import os
 import time
 import re
+import shutil
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -604,24 +605,48 @@ class ZzerParser:
         # Получаем brandId из payload задачи
         brand_id = task.get('payload', {}).get('brandId', 'unknown')
         
-        # Сохраняем во временный файл с новой структурой
-        json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
-        data = {
-            'updated_at': datetime.now().isoformat(),
-            'products': products
-        }
-        with open(json_filename_temp, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
         # Финальный файл
         json_filename = results_dir / f'brand_{brand_id}.json'
         
-        # Переименовываем _temp в обычный файл (с заменой если существует)
-        if json_filename.exists():
-            json_filename.unlink()  # Удаляем старый файл
-        json_filename_temp.rename(json_filename)
+        # Проверяем, есть ли временный файл (может быть уже сохранен через save_batch)
+        json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
+        updated_at = datetime.now().isoformat()
         
-        print(f"\n✓ JSON: {json_filename}")
+        if json_filename_temp.exists():
+            # Читаем updated_at из временного файла
+            try:
+                with open(json_filename_temp, 'r', encoding='utf-8') as f:
+                    temp_data = json.load(f)
+                    if isinstance(temp_data, dict) and 'updated_at' in temp_data:
+                        updated_at = temp_data['updated_at']
+            except:
+                pass  # Используем текущее время, если не удалось прочитать
+            
+            # Копируем временный файл в финальный
+            try:
+                shutil.copy2(json_filename_temp, json_filename)
+                
+                # Проверяем, что копирование прошло успешно
+                if json_filename.exists() and json_filename.stat().st_size > 0:
+                    # Удаляем временный файл только после успешного копирования
+                    json_filename_temp.unlink()
+                    print(f"\n✓ JSON: {json_filename}")
+                else:
+                    raise Exception("Файл не был скопирован или пуст")
+                    
+            except Exception as e:
+                print(f"\n✗ Ошибка при сохранении: {e}")
+                print(f"   Временный файл сохранен: {json_filename_temp}")
+                raise
+        else:
+            # Если временного файла нет, создаем финальный напрямую
+            data = {
+                'updated_at': updated_at,
+                'products': products
+            }
+            with open(json_filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"\n✓ JSON: {json_filename}")
         
         # Статистика
         total_images = sum(len(p.get('all_images', [])) for p in products)
@@ -629,7 +654,7 @@ class ZzerParser:
         print("📊 Итого:")
         print(f"   Товаров: {len(products)}")
         print(f"   Изображений (ссылок): {total_images}")
-        print(f"   Обновлено: {data['updated_at']}")
+        print(f"   Обновлено: {updated_at}")
         print(f"   Файл: {json_filename}")
         print(f"{'='*60}")
         print("\n✅ Парсинг завершен!")
