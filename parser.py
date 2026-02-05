@@ -3,7 +3,6 @@
 
 import asyncio
 import json
-import os
 import time
 import re
 import shutil
@@ -22,34 +21,9 @@ class ZzerParser:
         self.api_config = self.config['api']
         self.device_config = self.config['device']
         self.parsing_config = self.config['parsing']
-        
-        # Кеш переводов
         self.translation_cache = {}
         
-    def build_api_url(self, endpoint_name):
-        endpoint = self.api_config['endpoints'][endpoint_name]
-        return f"{self.api_config['base_url']}{endpoint}"
-    
-    def build_payload(self, task_payload):
-        # Начинаем с параметров устройства
-        payload = dict(self.device_config)
-        
-        # Добавляем timestamp
-        payload['ts'] = str(int(time.time()))
-        
-        # Добавляем параметры задачи
-        payload.update(task_payload)
-        
-        # Вычисляем sn (подпись)
-        payload['sn'] = self.calculate_signature(payload)
-        
-        return payload
-    
-    def calculate_signature(self, payload):
-        return ""
-    
     def translate_param(self, chinese_text):
-        """Перевод китайских параметров на русский"""
         translations = {
             '系列': 'Серия',
             '序列号': 'Серийный номер',
@@ -75,102 +49,82 @@ class ZzerParser:
         return translations.get(chinese_text, chinese_text)
     
     def translate_chinese_to_russian(self, text):
-        """Автоматический перевод китайского текста на русский через Google Translate"""
         if not text or not isinstance(text, str):
             return text
         
-        # Проверяем есть ли китайские символы
         has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
         
         if not has_chinese:
             return text
         
-        # Проверяем кеш
         if text in self.translation_cache:
             return self.translation_cache[text]
         
         try:
-            # Используем GoogleTranslator для перевода
             translator = GoogleTranslator(source='zh-CN', target='ru')
             translated = translator.translate(text)
-            
-            # Сохраняем в кеш
             self.translation_cache[text] = translated
-            
             return translated
         except Exception as e:
-            # Если перевод не удался, возвращаем оригинал
-            print(f"      Ошибка перевода: {e}")
             return text
     
     def translate_product_name(self, name):
-        """Перевод названия товара с сохранением латинских названий серий"""
         if not name or not isinstance(name, str):
             return name
         
-        # Извлекаем латинские буквы, цифры и пробелы в начале строки (название серии)
-        # Например: "Trendy CC", "Classic Flap", "Boy", "255"
         match = re.match(r'^([A-Za-z0-9\s]+)', name)
         
         if match:
-            # Есть латинская часть в начале
             latin_part = match.group(1).strip()
             chinese_part = name[len(match.group(1)):].strip()
             
             if chinese_part:
-                # Переводим только китайскую часть
                 translated_chinese = self.translate_chinese_to_russian(chinese_part)
                 return f"{latin_part} {translated_chinese}"
             else:
-                # Только латинская часть
                 return latin_part
         else:
-            # Нет латинской части, переводим всё
             return self.translate_chinese_to_russian(name)
     
-    def extract_product_data(self, raw_item):
-        """Извлечение данных из товара"""
-        # Проверяем, есть ли вложенный объект product
+    def extract_product_data(self, raw_item, brand_filter=None):
         if 'product' in raw_item and isinstance(raw_item['product'], dict):
             product = raw_item['product']
         else:
             product = raw_item
         
-        # ID товара
+        brand = product.get('brand') or product.get('brandName', '')
+        
+        if brand_filter and brand.lower() != brand_filter.lower():
+            return None
+        
         product_id = str(product.get('id') or product.get('productId') or 
                         product.get('spuId') or product.get('sku', ''))
         
-        # Название и модель
         name = product.get('name') or product.get('productName') or product.get('title', '')
         
-        # Описание
-        description = product.get('description') or product.get('desc') or product.get('degreeName', '')
+        condition_raw = product.get('degreeName', '')
+        condition = re.sub(r'[^\d.]', '', condition_raw) if condition_raw else ''
         
-        # Оригинальная цена без скидки (основная цена)
         price_raw = product.get('originalPrice', 0)
         if price_raw and isinstance(price_raw, (int, float)):
             price_cny = float(price_raw)
             price = str(price_cny)
-            # Конвертация в рубли: юань * 12 * 1.35
             price_rub = price_cny * 12 * 1.35
         else:
             price = ''
             price_rub = 0
         
-        # Цена со скидкой (если есть)
         price_discount_raw = (product.get('price') or product.get('salePrice') or 
                               product.get('currentPrice') or product.get('showPrice', 0))
         
         if price_discount_raw and isinstance(price_discount_raw, (int, float)):
             price_discount_cny = float(price_discount_raw)
             price_discount = str(price_discount_cny)
-            # Конвертация в рубли: юань * 12 * 1.35
             price_rub_discount = price_discount_cny * 12 * 1.35
         else:
             price_discount = ''
             price_rub_discount = 0
         
-        # Основное изображение (главное)
         main_img = product.get('ico') or product.get('image') or product.get('mainImage') or product.get('img')
         if main_img:
             if not main_img.startswith('http'):
@@ -179,21 +133,15 @@ class ZzerParser:
         else:
             main_image = None
         
-        # Дополнительная информация
-        brand = product.get('brand') or product.get('brandName', '')
         size = product.get('sizeName', '')
-        condition_raw = product.get('degreeName', '')
-        # Извлекаем только цифры из condition (например, "9.5新" -> "9.5")
-        condition = re.sub(r'[^\d.]', '', condition_raw) if condition_raw else ''
         sku = product.get('sku', '')
         
-        # Переводим название на русский (с сохранением латинских названий серий)
         name_ru = self.translate_product_name(name) if name else ''
         
         return {
             'id': product_id,
             'sku': sku,
-            'article': '',  # Заполнится при парсинге карточки
+            'article': sku,
             'name': name,
             'name_ru': name_ru,
             'description': f"{condition_raw}. Size: {size}" if size else condition_raw,
@@ -206,20 +154,16 @@ class ZzerParser:
             'size': size,
             'condition': condition,
             'main_image': main_image if main_image else '',
-            'city': '',  # Заполнится при парсинге карточки
-            'all_images': [],  # Заполнится при парсинге карточки
-            'details': {}  # Заполнится при парсинге карточки
+            'city': '',
+            'all_images': [main_image] if main_image else [],
+            'details': {}
         }
     
     async def get_product_details(self, page, product_id, sku):
-        """Получение детальной информации из карточки товара через API"""
         city_code = ''
-        article = sku  # По умолчанию article = sku
+        article = sku
         
         try:
-            print(f"    Детали товара...")
-            
-            # Формируем параметры для API запроса
             detail_params = {
                 'deviceId': self.device_config['deviceId'],
                 'fmt': self.device_config['fmt'],
@@ -237,7 +181,6 @@ class ZzerParser:
             
             api_url = f"{self.api_config['base_url']}/product/api/v1/product/detail"
             
-            # Выполняем API запрос через JavaScript в браузере
             api_data = await page.evaluate(f"""
                 async () => {{
                     const params = new URLSearchParams({json.dumps(detail_params)});
@@ -255,44 +198,24 @@ class ZzerParser:
                 }}
             """)
             
-            # Проверяем успешность ответа (код может быть 0, '0', или вообще отсутствовать при успехе)
             if not api_data:
-                print(f"    ✗ Нет данных от API")
-                return {
-                    'details': {},
-                    'all_images': [],
-                    'city': '',
-                    'article': article  # Возвращаем sku
-                }
+                return {'details': {}, 'all_images': [], 'city': '', 'article': article}
             
-            # Проверяем код успеха (для detail API код = 100000)
             code = api_data.get('code')
             if code not in [0, '0', 100000, '100000'] or not api_data.get('data'):
-                print(f"    ✗ Ошибка API: код={code}, msg={api_data.get('msg', 'Unknown')}")
-                return {
-                    'details': {},
-                    'all_images': [],
-                    'city': '',
-                    'article': article  # Возвращаем sku
-                }
+                return {'details': {}, 'all_images': [], 'city': '', 'article': article}
             
-            # Извлекаем данные из ответа API
             product_data = api_data.get('data', {})
             detail = product_data.get('detail', {})
             product_attr = product_data.get('productAttr', {})
-            product_attr_v2 = product_data.get('productAttrV2', {})
             
-            # Извлекаем город из storeTextEn (например, "Shanghai ZZER Blackstone | HS3-2")
             store_text_en = detail.get('storeTextEn', '')
             if store_text_en:
                 first_word = store_text_en.split()[0] if store_text_en.split() else ''
                 if first_word and len(first_word) >= 3:
                     city_code = first_word[:3].upper()
-                    article = f"{sku}{city_code}"  # sku + city_code
-                    print(f"      ℹ️ Город: {store_text_en} → {city_code}")
+                    article = f"{sku}{city_code}"
             
-            
-            # Извлекаем параметры из productAttr
             details = {}
             
             for item in product_attr:
@@ -305,16 +228,13 @@ class ZzerParser:
                 if not param_name or not param_values:
                     continue
                 
-                # Переводим имя параметра
                 translated_name = self.translate_param(param_name)
                 
-                # Собираем все значения
                 values_list = []
                 for val in param_values:
                     if isinstance(val, dict):
                         value_text = val.get('value', '')
                         if value_text:
-                            # Переводим значение если оно на китайском
                             translated_value = self.translate_chinese_to_russian(value_text)
                             values_list.append(translated_value)
                     elif isinstance(val, str):
@@ -322,30 +242,22 @@ class ZzerParser:
                         values_list.append(translated_value)
                 
                 if values_list:
-                    # Объединяем через " / " если несколько значений (чтобы не путать с разделителем CSV)
                     combined_value = ' / '.join(values_list)
-                    # Заменяем запятые на точки в десятичных дробях (22,5 -> 22.5)
                     combined_value = re.sub(r'(\d),(\d)', r'\1.\2', combined_value)
-                    # Заменяем остальные запятые на " - " (чтобы не ломать CSV)
                     combined_value = combined_value.replace(',', ' -')
                     details[translated_name] = combined_value
             
-            # Постобработка деталей
-            # 1. Извлекаем год из серийного номера
             if 'Серийный номер' in details:
                 serial = details['Серийный номер']
-                # Ищем разделитель ｜ и год после него
                 if '｜' in serial:
                     parts = serial.split('｜')
                     if len(parts) == 2:
                         details['Серийный номер'] = parts[0].strip()
                         details['Год'] = parts[1].strip()
             
-            # 2. Заменяем "g" на "г" в весе
             if 'Вес' in details:
                 details['Вес'] = details['Вес'].replace('g', 'г').replace('G', 'г')
             
-            # Извлекаем изображения из detail.imageList
             all_images = []
             
             if detail:
@@ -356,8 +268,6 @@ class ZzerParser:
                             img_url = f"{self.api_config['image_cdn']}/{img_url}"
                         all_images.append(img_url)
             
-            print(f"    ✓ Параметров: {len(details)}, Изображений: {len(all_images)}")
-            
             return {
                 'details': details,
                 'all_images': all_images,
@@ -366,59 +276,18 @@ class ZzerParser:
             }
             
         except Exception as e:
-            print(f"    ✗ Ошибка деталей: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                'details': {},
-                'all_images': [],
-                'city': '',
-                'article': sku  # Возвращаем sku даже при ошибке
-            }
-    
-    async def process_single_product(self, page, raw_product, idx):
-        """Обработка одного товара (для параллельного выполнения)"""
-        try:
-            product = self.extract_product_data(raw_product)
-            print(f"{idx}. {product['name'][:50]} - ¥{product['price']} (₽{product['price_rub']})")
-            
-            # Получаем детали из карточки товара
-            details_data = await self.get_product_details(page, product['id'], product['sku'])
-            
-            # Обновляем продукт
-            product['details'] = details_data.get('details', {})
-            product['city'] = details_data.get('city', '')
-            # article всегда должен быть: sku или sku + city
-            product['article'] = details_data.get('article', product['sku'])
-            
-            # Объединяем изображения: главное + из карточки
-            main_img = product['main_image']
-            all_images = []
-            
-            # Добавляем главное
-            if main_img:
-                all_images.append(main_img)
-            
-            # Добавляем остальные из карточки
-            for img_url in details_data.get('all_images', []):
-                if img_url != main_img:  # Не дублируем главное
-                    all_images.append(img_url)
-            
-            product['all_images'] = all_images
-            
-            await asyncio.sleep(0.3)  # Небольшая задержка
-            return product
-            
-        except Exception as e:
-            print(f"  ✗ Ошибка обработки товара #{idx}: {e}")
-            return None
+            return {'details': {}, 'all_images': [], 'city': '', 'article': sku}
     
     async def parse_task(self, task):
         max_products = self.parsing_config['max_products']
+        brand_name = task.get('brand_name', 'Chanel')
+        brand_id = task.get('payload', {}).get('brandId', '223')
         
         async with async_playwright() as p:
             print("\n" + "="*60)
             print(f"Задача: {task['name']}")
+            print(f"Бренд: {brand_name} (ID: {brand_id})")
+            print(f"Максимум товаров: {max_products}")
             print("="*60 + "\n")
             
             print("Запуск браузера...")
@@ -431,140 +300,177 @@ class ZzerParser:
             
             page = await context.new_page()
             
+            captured_products = []
+            captured_ids = set()
+            
+            async def capture_response(response):
+                url = response.url
+                if 'productList' in url:
+                    try:
+                        data = await response.json()
+                        code = str(data.get('code', ''))
+                        if code == '100000' and data.get('data') and data['data'].get('list'):
+                            for item in data['data']['list']:
+                                product = item.get('product') or item
+                                if product.get('id'):
+                                    brand = product.get('brandName', '').lower()
+                                    if brand_name.lower() in brand:
+                                        pid = product['id']
+                                        if pid not in captured_ids:
+                                            captured_ids.add(pid)
+                                            captured_products.append(item)
+                    except:
+                        pass
+            
+            page.on('response', capture_response)
+            
             try:
-                # Получаем список товаров через API
-                print("Открытие: https://mix.goshare2.com/")
-                await page.goto("https://mix.goshare2.com/", wait_until='domcontentloaded', timeout=30000)
+                print("Открытие: https://mix.goshare2.com/wv/pc/index/")
+                await page.goto('https://mix.goshare2.com/wv/pc/index/', wait_until='networkidle', timeout=30000)
                 await asyncio.sleep(2)
                 
-                # Нажимаем кнопку splash
-                try:
-                    button = await page.query_selector('button, div[class*="button"]')
-                    if button:
-                        await button.click()
-                        print("✓ Splash экран закрыт")
-                        await asyncio.sleep(2)
-                except:
-                    pass
+                print("Удаление оверлеев...")
+                await page.evaluate('''
+                    () => {
+                        const loginIframe = document.getElementById('zzer-login-iframe');
+                        if (loginIframe) loginIframe.remove();
+                        
+                        document.querySelectorAll('.login-view, .not-login-model').forEach(e => e.remove());
+                        document.querySelectorAll('[class*="mask"], [class*="overlay"], [class*="modal"]').forEach(e => e.remove());
+                        document.querySelectorAll('.item-wrap').forEach(e => e.remove());
+                    }
+                ''')
+                await asyncio.sleep(1)
                 
-                # API запросы с пагинацией
-                api_url = self.build_api_url(task['endpoint'])
+                print("Переход в раздел 'Купить'...")
+                await page.evaluate('''
+                    () => {
+                        const tabs = document.querySelectorAll('[class*="tab"], [class*="nav"] > *');
+                        for (const tab of tabs) {
+                            if (tab.textContent.trim() === '购买') {
+                                tab.click();
+                                return;
+                            }
+                        }
+                    }
+                ''')
+                await asyncio.sleep(3)
                 
-                print(f"\nAPI запрос: {api_url}")
-                
-                # Собираем товары со всех страниц
-                all_products = []
-                current_page = 1
-                page_size = task['payload'].get('size', 20) or task['payload'].get('pageSize', 20)
-                
-                while len(all_products) < max_products:
-                    # Обновляем номер страницы в payload
-                    payload = self.build_payload(task['payload'])
-                    payload['page'] = current_page
-                    if 'size' in payload:
-                        payload['size'] = page_size
-                    elif 'pageSize' in payload:
-                        payload['pageSize'] = page_size
-                    
-                    print(f"  Страница {current_page}...", end=' ')
-                    
-                    api_data = await page.evaluate(f"""
-                        async () => {{
-                            const response = await fetch('{api_url}', {{
-                                method: 'POST',
-                                headers: {{
-                                    'Content-Type': 'application/json',
-                                    'Accept': 'application/json'
-                                }},
-                                body: JSON.stringify({json.dumps(payload)})
-                            }});
-                            
-                            if (response.ok) {{
-                                return await response.json();
+                print(f"Выбор бренда {brand_name}...")
+                await page.evaluate(f'''
+                    () => {{
+                        const elements = document.querySelectorAll('*');
+                        for (const el of elements) {{
+                            const text = (el.textContent || '').trim();
+                            if (text.toLowerCase().includes('{brand_name.lower()}') && text.length < 30) {{
+                                el.scrollIntoView({{behavior: 'instant', block: 'center'}});
+                                el.click();
+                                return text;
                             }}
-                            return null;
                         }}
-                    """)
-                    
-                    if not api_data or not api_data.get('data'):
-                        print("⚠️ Ошибка API")
-                        break
-                    
-                    products_list = api_data.get('data', {}).get('list', [])
-                    if not products_list:
-                        print("конец списка")
-                        break
-                    
-                    print(f"✓ {len(products_list)} товаров")
-                    all_products.extend(products_list)
-                    
-                    # Если получили меньше чем page_size, значит это последняя страница
-                    if len(products_list) < page_size:
-                        break
-                    
-                    current_page += 1
-                    await asyncio.sleep(0.5)  # Задержка между запросами страниц
+                        return null;
+                    }}
+                ''')
+                await asyncio.sleep(5)
                 
-                if not all_products:
+                print(f"Начальное количество товаров: {len(captured_products)}")
+                
+                print("\nСкроллинг для загрузки товаров...")
+                no_new_count = 0
+                for i in range(200):
+                    prev = len(captured_products)
+                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await asyncio.sleep(1.5)
+                    
+                    if len(captured_products) >= max_products:
+                        print(f"\n✓ Достигнут лимит: {max_products} товаров")
+                        break
+                    
+                    if len(captured_products) > prev:
+                        no_new_count = 0
+                        if len(captured_products) % 100 == 0:
+                            print(f"  ✓ Загружено: {len(captured_products)} товаров {brand_name}")
+                    else:
+                        no_new_count += 1
+                        if no_new_count > 15:
+                            print(f"\n✓ Все товары загружены")
+                            break
+                
+                print(f"\n{'='*60}")
+                print(f"Всего перехвачено: {len(captured_products)} товаров {brand_name}")
+                print(f"{'='*60}\n")
+                
+                if not captured_products:
                     print("⚠️ Не удалось получить товары")
                     return []
                 
-                print(f"\n✓ Всего получено товаров: {len(all_products)}")
-                
-                # Ограничиваем количество
-                products_to_process = all_products[:max_products]
+                products_to_process = captured_products[:max_products]
                 total_count = len(products_to_process)
                 
-                # Размер батча
                 batch_size = self.parsing_config.get('batch_size', 50)
                 
-                # Проверяем, есть ли незавершенная работа (временный файл)
                 results_dir = Path('products')
-                brand_id = task.get('payload', {}).get('brandId', 'unknown')
+                results_dir.mkdir(parents=True, exist_ok=True)
                 json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
                 
                 processed_products = []
                 start_idx = 0
                 
-                # Проверяем временный файл для resume (но не основной, чтобы можно было перепарсить)
                 if json_filename_temp.exists():
                     try:
                         with open(json_filename_temp, 'r', encoding='utf-8') as f:
                             temp_data = json.load(f)
-                            # Поддерживаем как старый формат (массив), так и новый (объект с products)
                             if isinstance(temp_data, dict) and 'products' in temp_data:
                                 processed_products = temp_data['products']
                             else:
                                 processed_products = temp_data
                         start_idx = len(processed_products)
-                        print(f"\n✓ Найдено {start_idx} обработанных товаров во временном файле, продолжаем с позиции {start_idx + 1}")
+                        print(f"✓ Найдено {start_idx} обработанных товаров, продолжаем...")
                     except:
                         processed_products = []
                         start_idx = 0
                 
-                print(f"\n{'='*60}")
-                print(f"Обработка {total_count} товаров (батчами по {batch_size})")
-                print(f"Прогресс: {start_idx}/{total_count}")
-                print(f"{'='*60}\n")
+                print(f"\nОбработка {total_count} товаров (батчами по {batch_size})")
+                print(f"Прогресс: {start_idx}/{total_count}\n")
                 
-                # Обрабатываем товары батчами
                 for batch_start in range(start_idx, total_count, batch_size):
                     batch_end = min(batch_start + batch_size, total_count)
                     batch_products = products_to_process[batch_start:batch_end]
                     
                     print(f"\n{'─'*60}")
-                    print(f"📦 Батч {batch_start // batch_size + 1}: товары {batch_start + 1}-{batch_end} из {total_count}")
+                    print(f"📦 Батч {batch_start // batch_size + 1}: товары {batch_start + 1}-{batch_end}")
                     print(f"{'─'*60}\n")
                     
-                    # Обрабатываем товары последовательно (из-за page.goto в каждом товаре)
                     for i, raw_product in enumerate(batch_products):
                         idx = batch_start + i + 1
-                        result = await self.process_single_product(page, raw_product, idx)
+                        product = self.extract_product_data(raw_product, brand_filter=brand_name)
                         
-                        if result and not isinstance(result, Exception):
-                            processed_products.append(result)
+                        if not product:
+                            continue
+                        
+                        print(f"{idx}. {product['name'][:40]}... ¥{product['price_discount']}")
+                        
+                        details_data = await self.get_product_details(page, product['id'], product['sku'])
+                        
+                        product['details'] = details_data.get('details', {})
+                        product['city'] = details_data.get('city', '')
+                        product['article'] = details_data.get('article', product['sku'])
+                        
+                        main_img = product['main_image']
+                        all_images = []
+                        
+                        if main_img:
+                            all_images.append(main_img)
+                        
+                        for img_url in details_data.get('all_images', []):
+                            if img_url != main_img:
+                                all_images.append(img_url)
+                        
+                        product['all_images'] = all_images
+                        processed_products.append(product)
+                        
+                        await asyncio.sleep(0.2)
                     
-                    # Промежуточное сохранение после каждого батча
                     self.save_batch(processed_products, task, batch_end, total_count)
                 
                 return processed_products
@@ -578,14 +484,12 @@ class ZzerParser:
                 await browser.close()
     
     def save_batch(self, products, task, current, total):
-        """Промежуточное сохранение батча во временный файл"""
         results_dir = Path('products')
         results_dir.mkdir(parents=True, exist_ok=True)
         
         brand_id = task.get('payload', {}).get('brandId', 'unknown')
         json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
         
-        # Сохраняем с новой структурой
         data = {
             'updated_at': datetime.now().isoformat(),
             'products': products
@@ -598,37 +502,28 @@ class ZzerParser:
         print(f"\n  ✓ Сохранено: {len(products)}/{total} товаров ({total_images} изображений)")
     
     def save_results(self, products, task):
-        # Создаем папку products
         results_dir = Path('products')
         results_dir.mkdir(parents=True, exist_ok=True)
         
-        # Получаем brandId из payload задачи
         brand_id = task.get('payload', {}).get('brandId', 'unknown')
         
-        # Финальный файл
         json_filename = results_dir / f'brand_{brand_id}.json'
-        
-        # Проверяем, есть ли временный файл (может быть уже сохранен через save_batch)
         json_filename_temp = results_dir / f'brand_{brand_id}_temp.json'
         updated_at = datetime.now().isoformat()
         
         if json_filename_temp.exists():
-            # Читаем updated_at из временного файла
             try:
                 with open(json_filename_temp, 'r', encoding='utf-8') as f:
                     temp_data = json.load(f)
                     if isinstance(temp_data, dict) and 'updated_at' in temp_data:
                         updated_at = temp_data['updated_at']
             except:
-                pass  # Используем текущее время, если не удалось прочитать
+                pass
             
-            # Копируем временный файл в финальный
             try:
                 shutil.copy2(json_filename_temp, json_filename)
                 
-                # Проверяем, что копирование прошло успешно
                 if json_filename.exists() and json_filename.stat().st_size > 0:
-                    # Удаляем временный файл только после успешного копирования
                     json_filename_temp.unlink()
                     print(f"\n✓ JSON: {json_filename}")
                 else:
@@ -639,7 +534,6 @@ class ZzerParser:
                 print(f"   Временный файл сохранен: {json_filename_temp}")
                 raise
         else:
-            # Если временного файла нет, создаем финальный напрямую
             data = {
                 'updated_at': updated_at,
                 'products': products
@@ -648,7 +542,6 @@ class ZzerParser:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             print(f"\n✓ JSON: {json_filename}")
         
-        # Статистика
         total_images = sum(len(p.get('all_images', [])) for p in products)
         print(f"\n{'='*60}")
         print("📊 Итого:")
@@ -662,9 +555,7 @@ class ZzerParser:
     async def run(self, task_name=None):
         tasks = self.config['tasks']
         
-        # Фильтруем задачи
         if task_name:
-            # Ищем задачу по имени
             tasks_to_run = [t for t in tasks if t['name'].lower() == task_name.lower()]
             if not tasks_to_run:
                 print(f"❌ Задача '{task_name}' не найдена")
@@ -673,7 +564,6 @@ class ZzerParser:
                     print(f"  - {t['name']}")
                 return
         else:
-            # Берем только enabled задачи
             tasks_to_run = [t for t in tasks if t.get('enabled', False)]
         
         if not tasks_to_run:
@@ -681,7 +571,6 @@ class ZzerParser:
             print("\nСовет: Установите 'enabled': true в config.json или укажите задачу параметром --task")
             return
         
-        # Выполняем задачи
         for task in tasks_to_run:
             products = await self.parse_task(task)
             
@@ -697,10 +586,8 @@ async def main():
     
     args = parser.parse_args()
     
-    # Создаем парсер
     zzer_parser = ZzerParser(args.config)
     
-    # Показываем список задач
     if args.list:
         print("\nДоступные задачи в config.json:\n")
         for task in zzer_parser.config['tasks']:
@@ -712,10 +599,8 @@ async def main():
             print()
         return
     
-    # Запускаем парсер
     await zzer_parser.run(args.task)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
